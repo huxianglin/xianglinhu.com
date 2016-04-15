@@ -1,3 +1,0 @@
-this is a test page
-if you can see this file 
-that's mean this test is successful
