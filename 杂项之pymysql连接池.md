@@ -18,136 +18,137 @@
 那么连接池是怎么回事呢？原来使用pymysql创建一个conn对象的时候，就已经和mysql之间创建了一个tcp的长连接，只要不调用这个对象的close方法，这个长连接就不会断开，这样，我们创建了一组conn对象，并将这些conn对象放到队列里面去，这个队列现在就是一个连接池了。
 
 现在，我们先用一个连接，往数据库中插入100W条数据，下面是源码：
-    
-    import pymysql
-    import time
-    start=time.time()
-    conn = pymysql.connect(host="192.168.10.103",port=3306,user="root",passwd="123456",db="sql_example",charset="utf8")
-    conn.autocommit(True)  # 设置自动commit
-    cursor = conn.cursor(cursor=pymysql.cursors.DictCursor)  # 设置返回的结果集用字典来表示，默认是元祖
-    data=(("男",i,"张小凡%s" %i) for i in range(1000000))  # 伪造数据，data是个生成器
-    cursor.executemany("insert into tb1(gender,class_id,sname) values(%s,%s,%s)",data)  # 可以使用executemany执行多条sql
-    # conn.commit()
-    cursor.close()
-    conn.close()
-    print("totol time:",time.time()-start)
+```python   
+import pymysql
+import time
+start=time.time()
+conn = pymysql.connect(host="192.168.10.103",port=3306,user="root",passwd="123456",db="sql_example",charset="utf8")
+conn.autocommit(True)  # 设置自动commit
+cursor = conn.cursor(cursor=pymysql.cursors.DictCursor)  # 设置返回的结果集用字典来表示，默认是元祖
+data=(("男",i,"张小凡%s" %i) for i in range(1000000))  # 伪造数据，data是个生成器
+cursor.executemany("insert into tb1(gender,class_id,sname) values(%s,%s,%s)",data)  # 可以使用executemany执行多条sql
+# conn.commit()
+cursor.close()
+conn.close()
+print("totol time:",time.time()-start)
 
 执行结果为：
 
 totol time: 978.7649309635162
-
+```
 ## 3.多线程提升
 使用多线程，在启动时创建一组线程，每个线程去连接池里面获取一个连接，然后插入数据，这样将会大大提升执行sql的速度，下面是使用多线程实现的连接池源码：
-    
-    from gevent import monkey
-    monkey.patch_all()
-    
-    import threading
-    
-    import pymysql
-    from queue import Queue
-    import time
-    
-    class Exec_db:
-    
-        __v=None
-    
-        def __init__(self,host=None,port=None,user=None,passwd=None,db=None,charset=None,maxconn=5):
-            self.host,self.port,self.user,self.passwd,self.db,self.charset=host,port,user,passwd,db,charset
-            self.maxconn=maxconn
-            self.pool=Queue(maxconn)
-            for i in range(maxconn):
-                try:
-                    conn=pymysql.connect(host=self.host,port=self.port,user=self.user,passwd=self.passwd,db=self.db,charset=self.charset)
-                    conn.autocommit(True)
-                    # self.cursor=self.conn.cursor(cursor=pymysql.cursors.DictCursor)
-                    self.pool.put(conn)
-                except Exception as e:
-                    raise IOError(e)
-    
-        @classmethod
-        def get_instance(cls,*args,**kwargs):
-            if cls.__v:
-                return cls.__v
-            else:
-                cls.__v=Exec_db(*args,**kwargs)
-                return cls.__v
-    
-        def exec_sql(self,sql,operation=None):
-            """
-                执行无返回结果集的sql，主要有insert update delete
-            """
+```python    
+from gevent import monkey
+monkey.patch_all()
+
+import threading
+
+import pymysql
+from queue import Queue
+import time
+
+class Exec_db:
+
+    __v=None
+
+    def __init__(self,host=None,port=None,user=None,passwd=None,db=None,charset=None,maxconn=5):
+        self.host,self.port,self.user,self.passwd,self.db,self.charset=host,port,user,passwd,db,charset
+        self.maxconn=maxconn
+        self.pool=Queue(maxconn)
+        for i in range(maxconn):
             try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+                conn=pymysql.connect(host=self.host,port=self.port,user=self.user,passwd=self.passwd,db=self.db,charset=self.charset)
+                conn.autocommit(True)
+                # self.cursor=self.conn.cursor(cursor=pymysql.cursors.DictCursor)
+                self.pool.put(conn)
             except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-                return None
-            else:
-                cursor.close()
-                self.pool.put(conn)
-                return response
-    
-    
-        def exec_sql_feach(self,sql,operation=None):
-            """
-                执行有返回结果集的sql,主要是select
-            """
-            try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
-            except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-                return None,None
-            else:
-                data=cursor.fetchall()
-                cursor.close()
-                self.pool.put(conn)
-                return response,data
-    
-        def exec_sql_many(self,sql,operation=None):
-            """
-                执行多个sql，主要是insert into 多条数据的时候
-            """
-            try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.executemany(sql,operation) if operation else cursor.executemany(sql)
-            except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-            else:
-                cursor.close()
-                self.pool.put(conn)
-                return response
-    
-        def close_conn(self):
-            for i in range(self.maxconn):
-                self.pool.get().close()
-    
-    obj=Exec_db.get_instance(host="192.168.10.103",port=3306,user="root",passwd="012615",db="sql_example",charset="utf8",maxconn=10)
-    
-    def test_func(num):
-        data=(("男",i,"张小凡%s" %i) for i in range(num))
-        sql="insert into tb1(gender,class_id,sname) values(%s,%s,%s)"
-        print(obj.exec_sql_many(sql,data))
-    
-    job_list=[]
-    for i in range(10):
-        t=threading.Thread(target=test_func,args=(100000,))
-        t.start()
-        job_list.append(t)
-    for j in job_list:
-        j.join()
-    obj.close_conn()
-    print("totol time:",time.time()-start)
+                raise IOError(e)
+
+    @classmethod
+    def get_instance(cls,*args,**kwargs):
+        if cls.__v:
+            return cls.__v
+        else:
+            cls.__v=Exec_db(*args,**kwargs)
+            return cls.__v
+
+    def exec_sql(self,sql,operation=None):
+        """
+            执行无返回结果集的sql，主要有insert update delete
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+            return None
+        else:
+            cursor.close()
+            self.pool.put(conn)
+            return response
+
+
+    def exec_sql_feach(self,sql,operation=None):
+        """
+            执行有返回结果集的sql,主要是select
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+            return None,None
+        else:
+            data=cursor.fetchall()
+            cursor.close()
+            self.pool.put(conn)
+            return response,data
+
+    def exec_sql_many(self,sql,operation=None):
+        """
+            执行多个sql，主要是insert into 多条数据的时候
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.executemany(sql,operation) if operation else cursor.executemany(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+        else:
+            cursor.close()
+            self.pool.put(conn)
+            return response
+
+    def close_conn(self):
+        for i in range(self.maxconn):
+            self.pool.get().close()
+
+obj=Exec_db.get_instance(host="192.168.10.103",port=3306,user="root",passwd="012615",db="sql_example",charset="utf8",maxconn=10)
+
+def test_func(num):
+    data=(("男",i,"张小凡%s" %i) for i in range(num))
+    sql="insert into tb1(gender,class_id,sname) values(%s,%s,%s)"
+    print(obj.exec_sql_many(sql,data))
+
+job_list=[]
+for i in range(10):
+    t=threading.Thread(target=test_func,args=(100000,))
+    t.start()
+    job_list.append(t)
+for j in job_list:
+    j.join()
+obj.close_conn()
+print("totol time:",time.time()-start)
+```
 
 开启10个连接池插入100W数据的时间：
 
@@ -163,116 +164,117 @@ totol time: 191.73923873901367
 
 ## 4.协程提升
 使用协程的话，在I/O阻塞时，将会切换到其他任务去执行，这样理论上来说消耗的资源应该会比多线程要少。下面是协程实现的连接池源代码：
+```python
+from gevent import monkey
+monkey.patch_all()
+import gevent
 
-    from gevent import monkey
-    monkey.patch_all()
-    import gevent
-    
-    import pymysql
-    from queue import Queue
-    import time
-    
-    class Exec_db:
-    
-        __v=None
-    
-        def __init__(self,host=None,port=None,user=None,passwd=None,db=None,charset=None,maxconn=5):
-            self.host,self.port,self.user,self.passwd,self.db,self.charset=host,port,user,passwd,db,charset
-            self.maxconn=maxconn
-            self.pool=Queue(maxconn)
-            for i in range(maxconn):
-                try:
-                    conn=pymysql.connect(host=self.host,port=self.port,user=self.user,passwd=self.passwd,db=self.db,charset=self.charset)
-                    conn.autocommit(True)
-                    # self.cursor=self.conn.cursor(cursor=pymysql.cursors.DictCursor)
-                    self.pool.put(conn)
-                except Exception as e:
-                    raise IOError(e)
-    
-        @classmethod
-        def get_instance(cls,*args,**kwargs):
-            if cls.__v:
-                return cls.__v
-            else:
-                cls.__v=Exec_db(*args,**kwargs)
-                return cls.__v
-    
-        def exec_sql(self,sql,operation=None):
-            """
-                执行无返回结果集的sql，主要有insert update delete
-            """
+import pymysql
+from queue import Queue
+import time
+
+class Exec_db:
+
+    __v=None
+
+    def __init__(self,host=None,port=None,user=None,passwd=None,db=None,charset=None,maxconn=5):
+        self.host,self.port,self.user,self.passwd,self.db,self.charset=host,port,user,passwd,db,charset
+        self.maxconn=maxconn
+        self.pool=Queue(maxconn)
+        for i in range(maxconn):
             try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+                conn=pymysql.connect(host=self.host,port=self.port,user=self.user,passwd=self.passwd,db=self.db,charset=self.charset)
+                conn.autocommit(True)
+                # self.cursor=self.conn.cursor(cursor=pymysql.cursors.DictCursor)
+                self.pool.put(conn)
             except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-                return None
-            else:
-                cursor.close()
-                self.pool.put(conn)
-                return response
-    
-    
-        def exec_sql_feach(self,sql,operation=None):
-            """
-                执行有返回结果集的sql,主要是select
-            """
-            try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
-            except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-                return None,None
-            else:
-                data=cursor.fetchall()
-                cursor.close()
-                self.pool.put(conn)
-                return response,data
-    
-        def exec_sql_many(self,sql,operation=None):
-            """
-                执行多个sql，主要是insert into 多条数据的时候
-            """
-            try:
-                conn=self.pool.get()
-                cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
-                response=cursor.executemany(sql,operation) if operation else cursor.executemany(sql)
-            except Exception as e:
-                print(e)
-                cursor.close()
-                self.pool.put(conn)
-            else:
-                cursor.close()
-                self.pool.put(conn)
-                return response
-    
-        def close_conn(self):
-            for i in range(self.maxconn):
-                self.pool.get().close()
-    
-    obj=Exec_db.get_instance(host="192.168.10.103",port=3306,user="root",passwd="123456",db="sql_example",charset="utf8",maxconn=10)
-    
-    def test_func(num):
-        data=(("男",i,"张小凡%s" %i) for i in range(num))
-        sql="insert into tb1(gender,class_id,sname) values(%s,%s,%s)"
-        print(obj.exec_sql_many(sql,data))
-    
-    start=time.time()
-    job_list=[]
-    for i in range(10):
-        job_list.append(gevent.spawn(test_func,100000))
-    
-    gevent.joinall(job_list)
-    
-    obj.close_conn()
-    
-    print("totol time:",time.time()-start)
+                raise IOError(e)
+
+    @classmethod
+    def get_instance(cls,*args,**kwargs):
+        if cls.__v:
+            return cls.__v
+        else:
+            cls.__v=Exec_db(*args,**kwargs)
+            return cls.__v
+
+    def exec_sql(self,sql,operation=None):
+        """
+            执行无返回结果集的sql，主要有insert update delete
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+            return None
+        else:
+            cursor.close()
+            self.pool.put(conn)
+            return response
+
+
+    def exec_sql_feach(self,sql,operation=None):
+        """
+            执行有返回结果集的sql,主要是select
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.execute(sql,operation) if operation else cursor.execute(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+            return None,None
+        else:
+            data=cursor.fetchall()
+            cursor.close()
+            self.pool.put(conn)
+            return response,data
+
+    def exec_sql_many(self,sql,operation=None):
+        """
+            执行多个sql，主要是insert into 多条数据的时候
+        """
+        try:
+            conn=self.pool.get()
+            cursor=conn.cursor(cursor=pymysql.cursors.DictCursor)
+            response=cursor.executemany(sql,operation) if operation else cursor.executemany(sql)
+        except Exception as e:
+            print(e)
+            cursor.close()
+            self.pool.put(conn)
+        else:
+            cursor.close()
+            self.pool.put(conn)
+            return response
+
+    def close_conn(self):
+        for i in range(self.maxconn):
+            self.pool.get().close()
+
+obj=Exec_db.get_instance(host="192.168.10.103",port=3306,user="root",passwd="123456",db="sql_example",charset="utf8",maxconn=10)
+
+def test_func(num):
+    data=(("男",i,"张小凡%s" %i) for i in range(num))
+    sql="insert into tb1(gender,class_id,sname) values(%s,%s,%s)"
+    print(obj.exec_sql_many(sql,data))
+
+start=time.time()
+job_list=[]
+for i in range(10):
+    job_list.append(gevent.spawn(test_func,100000))
+
+gevent.joinall(job_list)
+
+obj.close_conn()
+
+print("totol time:",time.time()-start)
+```
 
 开启10个连接池插入100W数据的时间：
 
