@@ -1,4 +1,4 @@
-# 前端之django一些feature
+# django之一些feature
 ## 本节内容
 1. cookie
 2. session
@@ -303,7 +303,7 @@ text.html
             // these HTTP methods do not require CSRF protection
             return (/^(GET|HEAD|OPTIONS|TRACE)$/.test(method));
         }
-        $.ajaxSetup({  //设置ajax发送之前做的操作，在data里面加上一个键值对
+        $.ajaxSetup({  //设置ajax发送之前做的操作，在请求头里面加上一个键值对，django配置里面默认键是X-CSRFToken，可以自行在配置文件中修改
             beforeSend: function(xhr, settings) {
                 if (!csrfSafeMethod(settings.type) && !this.crossDomain) {
                     xhr.setRequestHeader("X-CSRFToken", csrftoken);
